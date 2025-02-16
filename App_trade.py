@@ -4,13 +4,27 @@ import os
 import logging
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.models import load_model
+from datetime import datetime, timedelta
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
+
+# Carregar modelo treinado
+try:
+    model = load_model("lstm_model.h5")
+    logging.info("✅ Modelo LSTM carregado com sucesso!")
+except Exception as e:
+    logging.error(f"❌ Erro ao carregar modelo: {e}")
+    model = None
+
+# Cache de previsões para evitar recálculo frequente
+cache = {
+    "timestamp": None,
+    "predictions": None
+}
 
 # Função para obter o preço do Bitcoin
 def get_bitcoin_price():
@@ -24,65 +38,42 @@ def get_bitcoin_price():
         logging.error(f"❌ Erro ao obter preço do Bitcoin: {e}")
         return None
 
-# Função para obter preços históricos
-def get_historical_prices():
-    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=60&interval=daily"
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        prices = [entry[1] for entry in data["prices"]]
-        return np.array(prices).reshape(-1, 1)
-    except Exception as e:
-        logging.error(f"❌ Erro ao obter preços históricos: {e}")
-        return None
-
-# Criar modelo LSTM
-def create_lstm_model():
-    model = Sequential([
-        LSTM(50, return_sequences=True, input_shape=(10, 1)),
-        LSTM(50),
-        Dense(1)
-    ])
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    return model
-
-# Treinar o modelo uma vez na inicialização
-def train_lstm_once():
-    global model, last_sequence
-
-    prices = get_historical_prices()
-    if prices is None or len(prices) < 30:
-        logging.error("❌ Dados insuficientes para treinar o modelo.")
-        return None
-
-    X, y = [], []
-    for i in range(len(prices) - 10):
-        X.append(prices[i:i+10])
-        y.append(prices[i+10])
-
-    X, y = np.array(X), np.array(y)
-
-    model.fit(X, y, epochs=50, batch_size=8, verbose=0)
-    last_sequence = X[-1].reshape(1, 10, 1)
-
-# Fazer previsão com o modelo já treinado
+# Fazer previsão usando o modelo carregado
 def predict_future(days):
-    global model, last_sequence
-    predictions = []
-    sequence = last_sequence.copy()
+    global cache
 
-    for _ in range(days):
-        pred = model.predict(sequence)
-        predictions.append(float(pred[0, 0]))
-        sequence = np.roll(sequence, -1)
-        sequence[0, -1, 0] = pred
+    # Se a previsão foi feita nos últimos 30 minutos, usar cache
+    if cache["timestamp"] and (datetime.now() - cache["timestamp"]) < timedelta(minutes=30):
+        logging.info("🟢 Usando previsão do cache")
+        return cache["predictions"].get(days)
 
-    return predictions[-1]
+    if model is None:
+        return None
 
-# Criar modelo e treinar na inicialização
-model = create_lstm_model()
-train_lstm_once()
+    # Pegar preços históricos recentes
+    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=60&interval=daily"
+    response = requests.get(url)
+    data = response.json()
+    prices = [entry[1] for entry in data["prices"]]
+    prices = np.array(prices[-10:]).reshape(1, 10, 1)
+
+    predictions = {}
+    sequence = prices.copy()
+
+    for d in [1, 30]:  # Prever 1 dia e 30 dias
+        pred_values = []
+        for _ in range(d):
+            pred = model.predict(sequence)
+            pred_values.append(float(pred[0, 0]))
+            sequence = np.roll(sequence, -1)
+            sequence[0, -1, 0] = pred
+        predictions[d] = pred_values[-1]
+
+    # Atualizar cache
+    cache["timestamp"] = datetime.now()
+    cache["predictions"] = predictions
+
+    return predictions.get(days)
 
 # Rota para checagem de saúde
 @app.route("/", methods=["GET"])
