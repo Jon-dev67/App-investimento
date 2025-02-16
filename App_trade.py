@@ -7,16 +7,11 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
-from sqlalchemy import create_engine, text
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
-
-# Conectar ao banco SQLite local
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///bitcoin.db")
-engine = create_engine(DATABASE_URL)
 
 # Função para obter o preço do Bitcoin usando CoinGecko
 def get_bitcoin_price():
@@ -30,37 +25,28 @@ def get_bitcoin_price():
         logging.error(f"❌ Erro ao obter preço do Bitcoin: {e}")
         return None
 
-# Função para criar a tabela no banco caso não exista
-def create_table():
-    with engine.connect() as conn:
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS bitcoin_prices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            price REAL
-        )
-        """)
-        conn.commit()
-
-# Salvar preço no banco
-def save_price(price):
+# Função para obter preços históricos do Bitcoin
+def get_historical_prices():
+    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=60&interval=daily"
     try:
-        with engine.connect() as conn:
-            conn.execute(text("INSERT INTO bitcoin_prices (price) VALUES (:price)"), {"price": price})
-            conn.commit()
-    except Exception as e:
-        logging.error(f"❌ Erro ao salvar preço no banco: {e}")
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        prices = [entry[1] for entry in data["prices"]]  # Apenas os preços
+        return prices
+    except (requests.RequestException, ValueError, KeyError) as e:
+        logging.error(f"❌ Erro ao obter preços históricos: {e}")
+        return None
 
 # Função para treinar o modelo LSTM
 def train_lstm_model(days):
     try:
-        df = pd.read_sql("SELECT * FROM bitcoin_prices ORDER BY timestamp ASC", con=engine)
-
-        if len(df) < 30:
+        prices = get_historical_prices()
+        if prices is None or len(prices) < 30:
             return None
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"]).astype(int) // 10**9
-        prices = df["price"].values.reshape(-1, 1)
+        # Normalizar os dados
+        prices = np.array(prices).reshape(-1, 1)
 
         # Criar sequências para LSTM
         seq_length = 10
@@ -91,7 +77,7 @@ def train_lstm_model(days):
             last_sequence = np.roll(last_sequence, -1)
             last_sequence[0, -1, 0] = pred
 
-        return future_predictions[-1]  # Retorna a previsão para o último dia da sequência
+        return future_predictions[-1]  # Retorna a previsão para o último dia
     except Exception as e:
         logging.error(f"❌ Erro no modelo LSTM: {e}")
         return None
@@ -106,7 +92,6 @@ def health_check():
 def price():
     price = get_bitcoin_price()
     if price is not None:
-        save_price(price)
         return jsonify({"price": price})
     return jsonify({"error": "Não foi possível obter o preço."}), 500
 
@@ -147,12 +132,7 @@ def recommendation():
         "predicted_price_30d": prediction_30d
     })
 
-# Criar a tabela se não existir
-
-
 # Iniciar a API no Render corretamente
 if __name__ == "__main__":
-    with app.app_context():
-      db.create_all()
     port = int(os.environ.get("PORT", 10000))  # Render pode definir a porta automaticamente
     app.run(host="0.0.0.0", port=port, debug=True)
