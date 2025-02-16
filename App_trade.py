@@ -30,16 +30,28 @@ def get_bitcoin_price():
         logging.error(f"❌ Erro ao obter preço do Bitcoin: {e}")
         return None
 
+# Função para criar a tabela no banco caso não exista
+def create_table():
+    with engine.connect() as conn:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS bitcoin_prices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            price REAL
+        )
+        """)
+        conn.commit()
+
 # Salvar preço no banco
 def save_price(price):
     try:
         with engine.connect() as conn:
-            conn.execute(text("INSERT INTO bitcoin_prices (timestamp, price) VALUES (CURRENT_TIMESTAMP, :price)"), {"price": price})
+            conn.execute(text("INSERT INTO bitcoin_prices (price) VALUES (:price)"), {"price": price})
             conn.commit()
     except Exception as e:
         logging.error(f"❌ Erro ao salvar preço no banco: {e}")
 
-# Treinar modelo LSTM para previsões
+# Função para treinar o modelo LSTM
 def train_lstm_model(days):
     try:
         df = pd.read_sql("SELECT * FROM bitcoin_prices ORDER BY timestamp ASC", con=engine)
@@ -135,7 +147,12 @@ def recommendation():
         "predicted_price_30d": prediction_30d
     })
 
+# Criar a tabela se não existir
+
+
 # Iniciar a API no Render corretamente
 if __name__ == "__main__":
+    with app.app_context():
+      db.create_all()
     port = int(os.environ.get("PORT", 10000))  # Render pode definir a porta automaticamente
     app.run(host="0.0.0.0", port=port, debug=True)
